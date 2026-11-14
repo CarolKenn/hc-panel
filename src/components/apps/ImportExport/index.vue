@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { UploadFileInfo } from 'naive-ui'
 import { NAlert, NButton, NCheckbox, NCheckboxGroup, NDivider, NInput, NSpace, NUpload, useMessage } from 'naive-ui'
 import { RoundCardModal, SvgIcon } from '@/components/common'
@@ -8,6 +8,8 @@ import { ConfigVersionLowError, FormatError, exportJson, importJsonString } from
 import { get as getAbout } from '@/api/system/about'
 import { edit as addGroup, getList as getGroupList } from '@/api/panel/itemIconGroup'
 import { addMultiple as addMultipleIcons, getListByGroupId } from '@/api/panel/itemIcon'
+import type { DataExportOptions, DataExportSummary } from '@/api/panel/dataExport'
+import { exportData, getSummary as getExportSummary } from '@/api/panel/dataExport'
 
 import { t } from '@/locales'
 
@@ -25,6 +27,29 @@ const loading = ref(false)
 const uploadLoading = ref(false)
 const version = ref('') // 当前软件版本
 const debug = ref(false)
+
+// 完整数据备份
+const backupLoading = ref(false)
+const backupSummary = ref<DataExportSummary | null>(null)
+const backupOptions = ref<DataExportOptions>({
+  includeIcons: true,
+  includeStyle: true,
+  includeFiles: true,
+})
+
+const backupSummaryText = computed(() => {
+  if (!backupSummary.value)
+    return t('apps.exportImport.backupLoadingSummary')
+
+  return t('apps.exportImport.backupSummary', {
+    groups: backupSummary.value.groupCount,
+    icons: backupSummary.value.iconCount,
+    files: backupSummary.value.fileCount,
+    size: formatFileSize(backupSummary.value.fileSize),
+  })
+})
+
+const backupOptionsEmpty = computed(() => !backupOptions.value.includeIcons && !backupOptions.value.includeStyle && !backupOptions.value.includeFiles)
 
 const importObj = ref<ImportJsonResult | null> (null)
 
@@ -139,6 +164,106 @@ async function exportIcons(): Promise<IconGroup[]> {
   }
 }
 
+// 文件大小格式化
+function formatFileSize(size: number): string {
+  if (!size || size <= 0)
+    return '0 B'
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = size
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value = value / 1024
+    unitIndex++
+  }
+
+  return `${unitIndex === 0 ? value : value.toFixed(1)} ${units[unitIndex]}`
+}
+
+// 获取可导出的数据概览
+async function loadBackupSummary() {
+  try {
+    const res = await getExportSummary()
+    if (res.data.code === 0)
+      backupSummary.value = res.data.data
+  }
+  catch (error) {
+    console.error('Failed to load export summary', error)
+  }
+}
+
+// 从响应头解析下载文件名
+function parseDownloadFileName(disposition?: string): string {
+  if (!disposition)
+    return ''
+
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match)
+    return decodeURIComponent(utf8Match[1])
+
+  const match = disposition.match(/filename="?([^";]+)"?/i)
+  return match ? match[1] : ''
+}
+
+// 触发浏览器下载
+function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function defaultBackupFileName(): string {
+  const now = new Date()
+  const pad = (value: number) => `${value}`.padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return `SunPanel-Backup-${backupSummary.value?.username || 'user'}-${stamp}.zip`
+}
+
+// 导出完整数据备份
+async function handleExportBackup() {
+  if (backupOptionsEmpty.value) {
+    ms.warning(t('apps.exportImport.backupSelectAtLeastOne'))
+    return
+  }
+
+  backupLoading.value = true
+  try {
+    const response = await exportData({ ...backupOptions.value })
+    const blob = response.data
+
+    // 后端异常时返回的是 JSON
+    if (blob.type.includes('application/json')) {
+      let errMsg = t('common.failed')
+      try {
+        const result = JSON.parse(await blob.text())
+        if (result?.msg)
+          errMsg = result.msg
+      }
+      catch (error) {
+        console.error('Failed to parse export error response', error)
+      }
+      ms.error(errMsg)
+      return
+    }
+
+    const fileName = parseDownloadFileName(response.headers['content-disposition'] as string | undefined) || defaultBackupFileName()
+    downloadBlob(blob, fileName)
+    ms.success(t('common.success'))
+  }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ms.error(`${t('common.failed')}: ${message}`)
+  }
+  finally {
+    backupLoading.value = false
+  }
+}
+
 onMounted(() => {
   interface Version {
     versionName: string
@@ -149,6 +274,8 @@ onMounted(() => {
     if (res.code === 0)
       version.value = res.data.versionName
   })
+
+  loadBackupSummary()
 })
 
 function handleFileChange(options: { file: UploadFileInfo; fileList: Array<UploadFileInfo> }) {
@@ -250,10 +377,47 @@ async function handleStartImport() {
 
 <template>
   <div class="pt-2">
+    <NDivider title-placement="left">
+      {{ $t('apps.exportImport.backupTitle') }}
+    </NDivider>
+
+    <NAlert type="default" :bordered="false">
+      <p>{{ $t('apps.exportImport.backupTip') }}</p>
+    </NAlert>
+
+    <NSpace justify="center" :size="18" class="mt-4">
+      <NCheckbox v-model:checked="backupOptions.includeIcons" :disabled="backupLoading">
+        {{ $t('apps.exportImport.backupIncludeIcons') }}
+      </NCheckbox>
+      <NCheckbox v-model:checked="backupOptions.includeStyle" :disabled="backupLoading">
+        {{ $t('apps.exportImport.backupIncludeStyle') }}
+      </NCheckbox>
+      <NCheckbox v-model:checked="backupOptions.includeFiles" :disabled="backupLoading">
+        {{ $t('apps.exportImport.backupIncludeFiles') }}
+      </NCheckbox>
+    </NSpace>
+
+    <div class="mt-2 text-center text-[13px] opacity-70">
+      {{ backupSummaryText }}
+    </div>
+
+    <div class="flex justify-center mt-4">
+      <NButton type="primary" size="large" :loading="backupLoading" :disabled="backupOptionsEmpty" @click="handleExportBackup">
+        <template #icon>
+          <SvgIcon icon="fa6:solid-file-export" />
+        </template>
+        {{ $t('apps.exportImport.backupExport') }}
+      </NButton>
+    </div>
+
+    <NDivider title-placement="left">
+      {{ $t('apps.exportImport.iconConfigTitle') }}
+    </NDivider>
+
     <NAlert type="info" :bordered="false">
       <p>{{ $t('apps.exportImport.tip') }}</p>
     </NAlert>
-    <div class="flex justify-center m-[50px]">
+    <div class="flex justify-center m-[30px]">
       <div class="m-[10px]">
         <NUpload
           accept=".sun-panel.json,.sunpanel.json"
