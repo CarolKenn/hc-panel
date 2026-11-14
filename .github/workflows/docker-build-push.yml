@@ -2,6 +2,16 @@ name: docker-push
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '镜像 tag（留空则读取 service/assets/version 中的版本号）'
+        required: false
+        default: '1.8.1-export'
+      push_latest:
+        description: '同时推送 latest 标签'
+        type: boolean
+        required: false
+        default: false
   # 暂时取消自动编译，优化后重新开启
   # push:
   #   tags:
@@ -14,14 +24,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Read version from file
-        id: read_version
-        run: echo "APP_VERSION=$(cut -d '|' -f 2 ./service/assets/version)" >> $GITHUB_ENV
+      - name: Check repository configuration
+        env:
+          IMAGE: ${{ vars.DOCKER_IMAGE_NAME }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          missing=0
+          if [ -z "${IMAGE}" ]; then
+            echo "::error::缺少仓库变量 DOCKER_IMAGE_NAME（例如 yourname/hc-panel）"
+            missing=1
+          fi
+          if [ -z "${DOCKERHUB_USERNAME}" ]; then
+            echo "::error::缺少仓库 Secret DOCKERHUB_USERNAME"
+            missing=1
+          fi
+          if [ -z "${DOCKERHUB_TOKEN}" ]; then
+            echo "::error::缺少仓库 Secret DOCKERHUB_TOKEN"
+            missing=1
+          fi
+          exit ${missing}
+
+      - name: Resolve image tags
+        env:
+          IMAGE: ${{ vars.DOCKER_IMAGE_NAME }}
+          INPUT_VERSION: ${{ inputs.version }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
+        run: |
+          set -euo pipefail
+
+          version="${INPUT_VERSION}"
+          if [ -z "${version}" ]; then
+            version="$(cut -d '|' -f 2 ./service/assets/version | tr -d '[:space:]')"
+          fi
+          if [ -z "${version}" ]; then
+            echo "::error::无法确定镜像版本，请在触发时填写 version 输入"
+            exit 1
+          fi
+
+          tags="${IMAGE}:${version}"
+          if [ "${PUSH_LATEST}" = "true" ]; then
+            tags="${tags},${IMAGE}:latest"
+          fi
+
+          echo "APP_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "APP_TAGS=${tags}" >> "$GITHUB_ENV"
+          echo "版本号: ${version}"
+          echo "镜像标签: ${tags}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
 
-      - name: Set up Docker Buildx 
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
       - name: Login to Docker Hub
@@ -29,11 +83,11 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
+
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .  # 这里在项目根目录找Dockerfile构建
           platforms: linux/amd64,linux/arm,linux/arm64
-          push: true 
-          tags: ${{ vars.DOCKER_IMAGE_NAME }}:${{ env.APP_VERSION }}, ${{ vars.DOCKER_IMAGE_NAME }}
+          push: true
+          tags: ${{ env.APP_TAGS }}
