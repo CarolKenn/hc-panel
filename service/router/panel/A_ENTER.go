@@ -8,4 +8,5 @@ func Init(routerGroup *gin.RouterGroup) {
 	InitUsersRouter(routerGroup)
 	InitItemIconGroup(routerGroup)
 	InitDataExport(routerGroup)
+	InitDataImport(routerGroup)
 }

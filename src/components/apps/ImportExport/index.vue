@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import type { UploadFileInfo } from 'naive-ui'
-import { NAlert, NButton, NCheckbox, NCheckboxGroup, NDivider, NInput, NSpace, NUpload, useMessage } from 'naive-ui'
+import { NAlert, NButton, NCheckbox, NCheckboxGroup, NDivider, NInput, NRadio, NRadioGroup, NSpace, NUpload, useMessage } from 'naive-ui'
 import { RoundCardModal, SvgIcon } from '@/components/common'
 import type { IconGroup, ImportJsonResult } from '@/utils/jsonImportExport'
 import { ConfigVersionLowError, FormatError, exportJson, importJsonString } from '@/utils/jsonImportExport'
@@ -10,6 +10,8 @@ import { edit as addGroup, getList as getGroupList } from '@/api/panel/itemIconG
 import { addMultiple as addMultipleIcons, getListByGroupId } from '@/api/panel/itemIcon'
 import type { DataExportOptions, DataExportSummary } from '@/api/panel/dataExport'
 import { exportData, getSummary as getExportSummary } from '@/api/panel/dataExport'
+import type { DataImportPreview } from '@/api/panel/dataImport'
+import { applyImport, previewBackup } from '@/api/panel/dataImport'
 
 import { t } from '@/locales'
 
@@ -50,6 +52,50 @@ const backupSummaryText = computed(() => {
 })
 
 const backupOptionsEmpty = computed(() => !backupOptions.value.includeIcons && !backupOptions.value.includeStyle && !backupOptions.value.includeFiles)
+
+// 从备份恢复
+const restoreShow = ref(false)
+const restorePreviewing = ref(false)
+const restoreLoading = ref(false)
+const restorePreview = ref<DataImportPreview | null>(null)
+const restoreMode = ref<'merge' | 'replace'>('merge')
+const restoreOptions = ref({
+  includeIcons: true,
+  includeStyle: true,
+  includeFiles: true,
+})
+
+const restoreOptionsEmpty = computed(() => !restoreOptions.value.includeIcons && !restoreOptions.value.includeStyle && !restoreOptions.value.includeFiles)
+
+const restoreMetaText = computed(() => {
+  const preview = restorePreview.value
+  if (!preview)
+    return ''
+
+  return t('apps.exportImport.restoreMeta', {
+    user: preview.sourceUsername || '-',
+    time: preview.exportTime || '-',
+    version: preview.appVersion || '-',
+  })
+})
+
+const restoreStatsText = computed(() => {
+  const preview = restorePreview.value
+  if (!preview)
+    return ''
+
+  return t('apps.exportImport.backupSummary', {
+    groups: preview.groupCount,
+    icons: preview.iconCount,
+    files: preview.fileCount,
+    size: formatFileSize(preview.fileSize),
+  })
+})
+
+const restoreWarnings = computed(() => {
+  const warnings = restorePreview.value?.warnings ?? []
+  return warnings.map(item => t(`apps.exportImport.restoreWarn.${item.code}`, item.params ?? {}))
+})
 
 const importObj = ref<ImportJsonResult | null> (null)
 
@@ -264,6 +310,99 @@ async function handleExportBackup() {
   }
 }
 
+// 恢复失败时的错误文案（后端返回固定错误码）
+function importErrorText(code: number, fallback?: string): string {
+  const messages: Record<number, string> = {
+    1400: t('apps.exportImport.errorImportFileFormat'),
+    1401: t('apps.exportImport.errorImportVersion'),
+    1402: t('apps.exportImport.errorImportSession'),
+    1403: t('apps.exportImport.errorImportEmpty'),
+  }
+  return messages[code] ?? (fallback || t('common.failed'))
+}
+
+// 选择备份文件后先解析预览，确认真实写入前不改动任何数据
+async function handleRestoreFileChange(options: { file: UploadFileInfo; fileList: Array<UploadFileInfo> }) {
+  const file = options.file.file
+  if (!file)
+    return
+
+  restorePreviewing.value = true
+  try {
+    const res = await previewBackup(file)
+    if (res.data.code !== 0) {
+      ms.error(importErrorText(res.data.code, res.data.msg))
+      return
+    }
+
+    const preview = res.data.data
+    restorePreview.value = preview
+    restoreOptions.value = {
+      includeIcons: preview.hasIcons,
+      includeStyle: preview.hasStyle,
+      includeFiles: preview.canRestoreFiles,
+    }
+    restoreMode.value = 'merge'
+    restoreShow.value = true
+  }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ms.error(`${t('common.failed')}: ${message}`)
+  }
+  finally {
+    restorePreviewing.value = false
+  }
+}
+
+// 执行恢复
+async function handleRestoreApply() {
+  const preview = restorePreview.value
+  if (!preview)
+    return
+
+  if (restoreOptionsEmpty.value) {
+    ms.warning(t('apps.exportImport.restoreSelectAtLeastOne'))
+    return
+  }
+
+  restoreLoading.value = true
+  try {
+    const res = await applyImport({
+      importId: preview.importId,
+      mode: restoreMode.value,
+      ...restoreOptions.value,
+    })
+
+    if (res.data.code !== 0) {
+      ms.error(importErrorText(res.data.code, res.data.msg))
+      return
+    }
+
+    const result = res.data.data
+    const fileCount = result.fileRestored + result.fileSkipped
+    ms.success(t('apps.exportImport.restoreSuccess', {
+      groups: result.groupCount,
+      icons: result.iconCount,
+      files: fileCount,
+    }), { duration: 6000 })
+    ms.info(t('apps.exportImport.restoreDoneRefresh'), { duration: 6000 })
+
+    if (result.warnings?.length)
+      result.warnings.forEach(item => ms.warning(t(`apps.exportImport.restoreWarn.${item.code}`, item.params ?? {})))
+
+    restoreShow.value = false
+    restorePreview.value = null
+    loadBackupSummary()
+  }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ms.error(`${t('common.failed')}: ${message}`)
+  }
+  finally {
+    restoreLoading.value = false
+  }
+}
+
 onMounted(() => {
   interface Version {
     versionName: string
@@ -401,13 +540,27 @@ async function handleStartImport() {
       {{ backupSummaryText }}
     </div>
 
-    <div class="flex justify-center mt-4">
+    <div class="flex flex-wrap justify-center items-center gap-3 mt-4">
       <NButton type="primary" size="large" :loading="backupLoading" :disabled="backupOptionsEmpty" @click="handleExportBackup">
         <template #icon>
           <SvgIcon icon="fa6:solid-file-export" />
         </template>
         {{ $t('apps.exportImport.backupExport') }}
       </NButton>
+
+      <NUpload
+        accept=".zip,.json"
+        :default-upload="false"
+        :show-file-list="false"
+        @change="handleRestoreFileChange"
+      >
+        <NButton type="info" size="large" :loading="restorePreviewing">
+          <template #icon>
+            <SvgIcon icon="fa6:solid-file-import" />
+          </template>
+          {{ $t('apps.exportImport.restore') }}
+        </NButton>
+      </NUpload>
     </div>
 
     <NDivider title-placement="left">
@@ -473,6 +626,79 @@ async function handleStartImport() {
         <pre>{{ jsonData }}</pre>
       </div>
     </div>
+
+    <!-- 从备份恢复 -->
+    <RoundCardModal v-model:show="restoreShow" style="max-width: 460px;" :title="$t('apps.exportImport.restoreTitle')">
+      <template v-if="restorePreview">
+        <div class="text-center text-[13px] opacity-70">
+          {{ restoreMetaText }}
+        </div>
+        <div class="text-center mt-1 font-medium">
+          {{ restoreStatsText }}
+        </div>
+
+        <NAlert v-if="restoreWarnings.length > 0" class="mt-3" :title="$t('common.warning')" type="warning">
+          <div v-for="(text, index) in restoreWarnings" :key="index">
+            {{ text }}
+          </div>
+        </NAlert>
+
+        <NDivider title-placement="left">
+          {{ $t('apps.exportImport.restoreOptionsTitle') }}
+        </NDivider>
+
+        <NSpace justify="center">
+          <NCheckbox v-model:checked="restoreOptions.includeIcons" :disabled="!restorePreview.hasIcons || restoreLoading">
+            {{ $t('apps.exportImport.backupIncludeIcons') }}
+          </NCheckbox>
+          <NCheckbox v-model:checked="restoreOptions.includeStyle" :disabled="!restorePreview.hasStyle || restoreLoading">
+            {{ $t('apps.exportImport.backupIncludeStyle') }}
+          </NCheckbox>
+          <NCheckbox v-model:checked="restoreOptions.includeFiles" :disabled="!restorePreview.canRestoreFiles || restoreLoading">
+            {{ $t('apps.exportImport.backupIncludeFiles') }}
+          </NCheckbox>
+        </NSpace>
+
+        <NDivider title-placement="left">
+          {{ $t('apps.exportImport.restoreModeTitle') }}
+        </NDivider>
+
+        <NRadioGroup v-model:value="restoreMode" :disabled="restoreLoading">
+          <div class="flex flex-col gap-2">
+            <NRadio value="merge">
+              {{ $t('apps.exportImport.restoreModeMerge') }}
+            </NRadio>
+            <div class="text-[12px] opacity-60 pl-6">
+              {{ $t('apps.exportImport.restoreModeMergeDesc') }}
+            </div>
+            <NRadio value="replace">
+              {{ $t('apps.exportImport.restoreModeReplace') }}
+            </NRadio>
+            <div class="text-[12px] opacity-60 pl-6">
+              {{ $t('apps.exportImport.restoreModeReplaceDesc') }}
+            </div>
+          </div>
+        </NRadioGroup>
+
+        <NAlert v-if="restoreMode === 'replace' && restoreOptions.includeIcons" class="mt-3" type="error" :bordered="false">
+          {{ $t('apps.exportImport.restoreReplaceWarning') }}
+        </NAlert>
+
+        <NSpace justify="center" class="mt-5">
+          <NButton :disabled="restoreLoading" @click="restoreShow = false">
+            {{ $t('common.cancel') }}
+          </NButton>
+          <NButton
+            type="success"
+            :loading="restoreLoading"
+            :disabled="restoreOptionsEmpty"
+            @click="handleRestoreApply"
+          >
+            {{ $t('apps.exportImport.restoreStart') }}
+          </NButton>
+        </NSpace>
+      </template>
+    </RoundCardModal>
 
     <RoundCardModal v-model:show="importRoundModalShow" style="max-width: 400px;" :title=" $t('apps.exportImport.import')">
       <div v-if="importWarning.length > 0">

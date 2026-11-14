@@ -377,23 +377,19 @@ func buildExportFileEntries(files []models.File) []exportFileEntry {
 	return entries
 }
 
-// 生成压缩包内部的文件路径，保持原有目录结构
+// 生成压缩包内部的文件路径，保持原有目录结构（相对上传目录）
 func buildArchivePath(src string) string {
 	p := strings.ReplaceAll(src, "\\", "/")
 	if p == "" {
 		return ""
 	}
 
-	if filepath.IsAbs(p) {
-		sourcePath := strings.TrimSuffix(strings.ReplaceAll(global.Config.GetValueString("base", "source_path"), "\\", "/"), "/")
-		if sourcePath != "" && strings.HasPrefix(p, sourcePath+"/") {
-			p = strings.TrimPrefix(p, sourcePath+"/")
-		} else {
-			p = path.Base(p)
-		}
+	if relative, ok := relativeToSourcePath(p); ok {
+		p = relative
+	} else if filepath.IsAbs(p) {
+		p = path.Base(p)
 	} else {
-		p = strings.TrimPrefix(p, "./")
-		p = strings.TrimLeft(p, "/")
+		p = strings.TrimLeft(strings.TrimPrefix(p, "./"), "/")
 	}
 
 	p = path.Clean(p)
@@ -402,6 +398,26 @@ func buildArchivePath(src string) string {
 	}
 
 	return "files/" + p
+}
+
+// 去掉上传目录前缀，得到相对于上传目录的路径
+func relativeToSourcePath(p string) (string, bool) {
+	sourcePath := strings.TrimSuffix(strings.ReplaceAll(global.Config.GetValueString("base", "source_path"), "\\", "/"), "/")
+	if sourcePath == "" {
+		return "", false
+	}
+
+	trimmedSource := strings.Trim(strings.TrimPrefix(sourcePath, "./"), "/")
+	if trimmedSource == "" {
+		return "", false
+	}
+
+	trimmedPath := strings.Trim(strings.TrimPrefix(p, "./"), "/")
+	if !strings.HasPrefix(trimmedPath, trimmedSource+"/") {
+		return "", false
+	}
+
+	return strings.TrimPrefix(trimmedPath, trimmedSource+"/"), true
 }
 
 // 构建导出压缩包，返回临时文件路径
