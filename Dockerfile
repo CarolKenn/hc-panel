@@ -1,10 +1,13 @@
 # build frontend
-FROM node AS web_image
+# 固定 Node 版本：FROM node 每次会拉最新大版本，Vite 4 在新版本 Node 上不保证可用
+FROM node:22 AS web_image
 
 # 华为源
 # RUN npm config set registry https://repo.huaweicloud.com/repository/npm/
 
-RUN npm install pnpm -g
+# pnpm-lock.yaml 为 lockfileVersion 6.0（pnpm 8 生成），
+# 安装最新版 pnpm 会因 lockfile 版本不一致导致 install 失败，这里固定 pnpm 8
+RUN npm install pnpm@8 -g
 
 WORKDIR /build
 
