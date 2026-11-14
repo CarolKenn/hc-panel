@@ -2,7 +2,8 @@ version: "3.2"
 
 services:
   sun-panel:
-    image: 'hslr/sun-panel:latest'
+    # 本仓库构建并发布到 GHCR 的镜像；拉取前需 docker login ghcr.io
+    image: 'ghcr.io/carolkenn/hc-panel:1.8.1-export'
     container_name: sun-panel
     volumes:
     - ./conf:/app/conf
