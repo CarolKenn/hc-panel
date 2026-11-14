@@ -629,7 +629,7 @@ async function handleStartImport() {
 
     <!-- 从备份恢复 -->
     <RoundCardModal v-model:show="restoreShow" style="max-width: 460px;" :title="$t('apps.exportImport.restoreTitle')">
-      <template v-if="restorePreview">
+      <div v-if="restorePreview" class="max-h-[62vh] overflow-y-auto pr-1">
         <div class="text-center text-[13px] opacity-70">
           {{ restoreMetaText }}
         </div>
@@ -697,7 +697,7 @@ async function handleStartImport() {
             {{ $t('apps.exportImport.restoreStart') }}
           </NButton>
         </NSpace>
-      </template>
+      </div>
     </RoundCardModal>
 
     <RoundCardModal v-model:show="importRoundModalShow" style="max-width: 400px;" :title=" $t('apps.exportImport.import')">
